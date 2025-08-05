@@ -1,0 +1,18 @@
+[
+  {
+    "ParameterKey": "VPCId",
+    "ParameterValue": "<imported-or-existing-vpc-id-or-!ImportValue>"
+  },
+  {
+    "ParameterKey": "AzureClientId",
+    "ParameterValue": "<your-azure-client-id>"
+  },
+  {
+    "ParameterKey": "AzureDomain",
+    "ParameterValue": "<your-azure-domain>"
+  },
+  {
+    "ParameterKey": "S3BucketName",
+    "ParameterValue": "<your-s3-bucket-name>"
+  }
+]

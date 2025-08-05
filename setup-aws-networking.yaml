@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Provision a VPC using AWS Service Catalog
+
+Parameters:
+  VpcName:
+    Type: String
+    Description: Name of the VPC
+  VpcBitMask:
+    Type: Number
+    Description: CIDR block for the VPC
+    MinValue: 23
+    MaxValue: 27
+  ProductId:
+    Type: String
+    Description: Service Catalog Product ID for the VPC
+  ProvisioningArtifactId:
+    Type: String
+    Description: Service Catalog Provisioning Artifact ID (version)
+  SubnetId:
+    Type: String
+    Description: Service Catalog Product ID for the VPC Subnet
+  SubnetProvisioningArtifactId:
+    Type: String
+    Description: Service Catalog Provisioning Artifact ID (version) for the VPC Subnet
+  PublicSubnet1Name:
+    Type: String
+    Description: Name of the first Public subnet
+  PublicSubnet1BitMask:
+    Type: Number
+    Description: CIDR block for the first Public subnet
+    MinValue: 24
+    MaxValue: 28
+  PublicSubnet2Name:
+    Type: String
+    Description: Name of the second Public subnet
+  PublicSubnet2BitMask:
+    Type: Number
+    Description: CIDR block for the second Public subnet
+    MinValue: 24
+    MaxValue: 28
+  
+
+Resources:
+  VPCProvisionedProduct:
+    Type: AWS::ServiceCatalog::CloudFormationProvisionedProduct
+    Properties:
+      ProductId: !Ref ProductId
+      ProvisioningArtifactId: !Ref ProvisioningArtifactId
+      ProvisioningParameters:
+        - Key: vpcname
+          Value: !Ref VpcName
+        - Key: cidrblocksize
+          Value: !Ref VpcBitMask
+        - Key: flowlogscloudwatchflowlogretention6E7F14BF
+          Value: "2-weeks"
+      Tags:
+        - Key: region
+          Value: !Ref AWS::Region
+        - Key: short_name
+          Value: !Ref VpcName
+
+  PublicSubnet1ProvisionedProduct:
+    Type: AWS::ServiceCatalog::CloudFormationProvisionedProduct
+    Properties:
+      ProductId: !Ref SubnetId
+      ProvisioningArtifactId: !Ref SubnetProvisioningArtifactId
+      ProvisioningParameters:
+        - Key: vpcid
+          Value: !GetAtt VPCProvisionedProduct.Outputs.vpcvpcidF3B8DA19
+        - Key: subnetname
+          Value: !Ref PublicSubnet1Name
+        - Key: cidrblocksize
+          Value: !Ref PublicSubnet1BitMask
+        - Key: availabilityzone
+          Value: !Select [0, Fn::GetAZs: !Ref "AWS::Region"]
+
+  PublicSubnet2ProvisionedProduct:
+    Type: AWS::ServiceCatalog::CloudFormationProvisionedProduct
+    Properties:
+      ProductId: !Ref SubnetId
+      ProvisioningArtifactId: !Ref SubnetProvisioningArtifactId
+      ProvisioningParameters:
+        - Key: vpcid
+          Value: !GetAtt VPCProvisionedProduct.Outputs.vpcvpcidF3B8DA19
+        - Key: subnetname
+          Value: !Ref PublicSubnet2Name
+        - Key: cidrblocksize
+          Value: !Ref PublicSubnet2BitMask
+        - Key: availabilityzone
+          Value: !Select [1, Fn::GetAZs: !Ref "AWS::Region"]
+
+Outputs:
+  VPCId:
+    Description: The ID of the VPC
+    Value: !GetAtt VPCProvisionedProduct.Outputs.vpcvpcidF3B8DA19
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcId
+  Subnet1Id:
+    Description: The ID of the first Public subnet
+    Value: !GetAtt PublicSubnet1ProvisionedProduct.Outputs.subnetid
+    Export:
+      Name: !Sub ${AWS::StackName}-Subnet1Id
+  Subnet2Id:
+    Description: The ID of the second Public subnet
+    Value: !GetAtt PublicSubnet2ProvisionedProduct.Outputs.subnetid
+    Export:
+      Name: !Sub ${AWS::StackName}-Subnet2Id
+

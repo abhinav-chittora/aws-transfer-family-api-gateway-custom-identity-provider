@@ -1,0 +1,42 @@
+[
+    {
+        "ParameterKey": "VpcName",
+        "ParameterValue": "<your-vpc-name>"
+    },
+    {
+        "ParameterKey": "VpcBitMask",
+        "ParameterValue": "<your-vpc-bitmask>"
+    },
+    {
+        "ParameterKey": "ProductId",
+        "ParameterValue": "<your-product-id>"
+    },
+    {
+        "ParameterKey": "ProvisioningArtifactId",
+        "ParameterValue": "<your-provisioning-artifact-id>"
+    },
+    {
+        "ParameterKey": "SubnetId",
+        "ParameterValue": "<your-subnet-product-id>"
+    },
+    {
+        "ParameterKey": "SubnetProvisioningArtifactId",
+        "ParameterValue": "<your-subnet-provisioning-artifact-id>"
+    },
+    {
+        "ParameterKey": "PublicSubnet1Name",
+        "ParameterValue": "<your-public-subnet-1-name>"
+    },
+    {
+        "ParameterKey": "PublicSubnet1BitMask",
+        "ParameterValue": "<your-public-subnet-1-bitmask>"
+    },
+    {
+        "ParameterKey": "PublicSubnet2Name",
+        "ParameterValue": "<your-public-subnet-2-name>"
+    },
+    {
+        "ParameterKey": "PublicSubnet2BitMask",
+        "ParameterValue": "<your-public-subnet-2-bitmask>"
+    }
+]

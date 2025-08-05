@@ -1,0 +1,198 @@
+
+# Provision AWS Trasnfer Family Instance with given Protocol (SFTP, FTPS) 
+#  with API Gateway as Custom Identity Provider which connects with Entra ID (formery Azure AD).
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Provision AWS Trasnfer Family Instance
+
+Parameters:
+  VPCId:
+    Type: String
+    Description: VPC Id
+  AzureClientId:
+    Type: String
+    Description: Azure Client Id
+    NoEcho: true
+  AzureDomain:
+    Type: String
+    Description: Azure Domain
+    NoEcho: true
+  S3BucketName:
+    Type: String
+    Description: Name of an existing S3 Bucket you will use for SFTP Storage
+ 
+Resources:
+  # Create 2 EIPs
+  EIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: TransferFamily-EIP1
+        - Key: Purpose
+          Value: TransferFamily-EIP1
+  EIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: TransferFamily-EIP2
+        - Key: Purpose
+          Value: TransferFamily-EIP2
+  
+  AzureClientIdSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TransferFamilyAzureClientId
+      Description: Azure Client Id
+      SecretString: !Sub
+                - '{ "AzureADClientID" : "${ClientIDParam}" }'
+                - ClientIDParam: !Ref AzureClientId
+      Tags:
+        - Key: Name
+          Value: TransferFamily-AzureClientId
+        - Key: Purpose
+          Value: TransferFamily-AzureClientId
+  AzureDomainSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TransferFamilyAzureDomain
+      Description: Azure Domain
+      SecretString: !Sub
+                - '{ "AzureADDomain" : "${DomainParam}" }'
+                - DomainParam: !Ref AzureDomain
+      Tags:
+        - Key: Name
+          Value: TransferFamily-AzureDomain
+        - Key: Purpose
+          Value: TransferFamily-AzureDomain
+  
+  S3TransferAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - transfer.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: SftpListAllBucketsPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:ListAllMyBuckets
+            - s3:GetBucketLocation
+            Resource: '*'
+      - PolicyName: SftpListHomeS3BucketPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            - s3:GetBucketLocation
+            Resource: !Sub
+                - 'arn:aws:s3:::${BucketName}'
+                - BucketName: !Ref S3BucketName
+      - PolicyName: SftpReadWriteHomeBucketAccessPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObjectVersion
+            - s3:DeleteObject
+            - s3:GetObjectVersion
+            Resource: !Sub
+                - 'arn:aws:s3:::${BucketName}/*/*'
+                - BucketName: !Ref S3BucketName
+      Tags:
+        - Key: Name
+          Value: TransferFamily-S3TransferAccessRole
+        - Key: Purpose
+          Value: TransferFamily-S3TransferAccessRole
+  
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: LambdaCWLoggingPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: arn:aws:logs:*:*:*
+      - PolicyName: SecretsManagerAccessPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - secretsmanager:GetSecretValue
+            Resource:
+            - !Ref AzureClientIdSecret
+            - !Ref AzureDomainSecret
+      Tags:
+        - Key: Name
+          Value: TransferFamily-LambdaExecutionRole
+        - Key: Purpose
+          Value: TransferFamily-LambdaExecutionRole
+  
+  TransferFamilyLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - transfer.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: AWSTransferLoggingPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:DescribeLogStreams
+            - logs:PutLogEvents
+            Resource: 'arn:aws:logs:*:*:log-group:/aws/transfer/*'
+      Tags:
+        - Key: Name
+          Value: TransferFamily-TransferFamilyLoggingRole
+        - Key: Purpose
+          Value: TransferFamily-TransferFamilyLoggingRole
+
+Outputs:
+  EIPs:
+    Description: Comma separated list of all Elastic IPs
+    Value: !Join [",", [!Ref EIP1, !Ref EIP2]]
