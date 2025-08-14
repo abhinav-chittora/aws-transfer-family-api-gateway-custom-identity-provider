@@ -1,79 +1,73 @@
-
-# Provision AWS Trasnfer Family Instance with given Protocol (SFTP, FTPS) 
-#  with API Gateway as Custom Identity Provider which connects with Entra ID (formery Azure AD).
-
+---
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Provision AWS Trasnfer Family Instance
-
+Description: Provides a template for creating an AWS Transfer for SFTP service.
+  The service use API Gateway for authentication endpoint as IdP.
 Parameters:
-  VPCId:
+  CreateServer:
+    AllowedValues:
+      - 'true'
     Type: String
-    Description: VPC Id
-  AzureClientId:
+    Description: If a server is created, the customer identity provider
+      is automatically associated with it.
+    Default: 'true'
+  SecretsManagerRegion:
     Type: String
-    Description: Azure Client Id
-    NoEcho: true
-  AzureDomain:
-    Type: String
-    Description: Azure Domain
-    NoEcho: true
-  S3BucketName:
-    Type: String
-    Description: Name of an existing S3 Bucket you will use for SFTP Storage
- 
+    Description: (Optional) The region the secrets are stored in.
+    Default: 'eu-central-1'
+Conditions:
+  CreateServer:
+    Fn::Equals:
+      - Ref: CreateServer
+      - 'true'
+  NotCreateServer:
+    Fn::Not:
+      - Condition: CreateServer
+  SecretsManagerRegionProvided:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: SecretsManagerRegion
+          - ''
 Resources:
-  # Create 2 EIPs
-  EIP1:
+  #Elastic IPs to be used for SFTP server. Two IPs used for HA
+  EIPTran01:
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
-      Tags:
-        - Key: Name
-          Value: TransferFamily-EIP1
-        - Key: Purpose
-          Value: TransferFamily-EIP1
-  EIP2:
+  EIPTran02:
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
-      Tags:
-        - Key: Name
-          Value: TransferFamily-EIP2
-        - Key: Purpose
-          Value: TransferFamily-EIP2
-  
-  AzureClientIdSecret:
-    Type: AWS::SecretsManager::Secret
+  #Create S3 Bucket and Transfer Role
+  EncryptedS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
     Properties:
-      Name: TransferFamilyAzureClientId
-      Description: Azure Client Id
-      SecretString: !Sub
-                - '{ "AzureADClientID" : "${ClientIDParam}" }'
-                - ClientIDParam: !Ref AzureClientId
-      Tags:
-        - Key: Name
-          Value: TransferFamily-AzureClientId
-        - Key: Purpose
-          Value: TransferFamily-AzureClientId
-  AzureDomainSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: TransferFamilyAzureDomain
-      Description: Azure Domain
-      SecretString: !Sub
-                - '{ "AzureADDomain" : "${DomainParam}" }'
-                - DomainParam: !Ref AzureDomain
-      Tags:
-        - Key: Name
-          Value: TransferFamily-AzureDomain
-        - Key: Purpose
-          Value: TransferFamily-AzureDomain
-  
+      AccessControl: Private
+      BucketName: !Sub 'sftp-${AWS::Region}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+        - Id: GlacierRule
+          Status: Enabled
+          ExpirationInDays: '400'
+          Transitions:
+            - TransitionInDays: '90'
+              StorageClass: GLACIER
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
   S3TransferAccessRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
         Statement:
         - Effect: Allow
           Principal:
@@ -81,48 +75,99 @@ Resources:
             - transfer.amazonaws.com
           Action:
           - sts:AssumeRole
-      Path: "/"
-      Policies:
-      - PolicyName: SftpListAllBucketsPolicy
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action:
-            - s3:ListAllMyBuckets
-            - s3:GetBucketLocation
-            Resource: '*'
-      - PolicyName: SftpListHomeS3BucketPolicy
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action:
+  S3TransferAccessManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
             - s3:ListBucket
             - s3:GetBucketLocation
-            Resource: !Sub
-                - 'arn:aws:s3:::${BucketName}'
-                - BucketName: !Ref S3BucketName
-      - PolicyName: SftpReadWriteHomeBucketAccessPolicy
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action:
-            - s3:PutObject
-            - s3:GetObject
-            - s3:DeleteObjectVersion
-            - s3:DeleteObject
-            - s3:GetObjectVersion
-            Resource: !Sub
-                - 'arn:aws:s3:::${BucketName}/*/*'
-                - BucketName: !Ref S3BucketName
+          Resource: !GetAtt EncryptedS3Bucket.Arn
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          - s3:GetObject
+          - s3:DeleteObjectVersion
+          - s3:DeleteObject
+          - s3:GetObjectVersion
+          Resource: !Sub "${EncryptedS3Bucket.Arn}/*"
+      Roles:
+      - !Ref S3TransferAccessRole
+  #Creation of SFTP server
+  TransferServer:
+    Type : AWS::Transfer::Server
+    Condition: CreateServer
+    Properties :
+      EndpointDetails:
+        AddressAllocationIds:
+          - !GetAtt EIPTran01.AllocationId
+          - !GetAtt EIPTran02.AllocationId
+        SubnetIds:
+          - !ImportValue sftp-networksetup-Subnet1Id
+          - !ImportValue sftp-networksetup-Subnet2Id
+
+        VpcId: !ImportValue sftp-networksetup-VpcId
+        SecurityGroupIds:
+          - !ImportValue sftp-networksetup-SecurityGroupId
+        # VpcEndpointId: !Ref TrVPCEndpoint (Not supported)
+      EndpointType: VPC
+      IdentityProviderDetails:
+        InvocationRole:
+          Fn::GetAtt: TransferIdentityProviderRole.Arn
+        Url:
+          Fn::Join:
+            - ''
+            - - https://
+              - Ref: CustomIdentityProviderApi
+              - .execute-api.
+              - Ref: AWS::Region
+              - .amazonaws.com/
+              - Ref: ApiStage
+      IdentityProviderType: API_GATEWAY
+      LoggingRole:
+        Fn::GetAtt: CloudWatchLoggingRole.Arn
       Tags:
         - Key: Name
-          Value: TransferFamily-S3TransferAccessRole
-        - Key: Purpose
-          Value: TransferFamily-S3TransferAccessRole
-  
+          Value: SFTPServer
+  CloudWatchLoggingRole:
+    Description: IAM role used by Transfer to log API requests to CloudWatch
+    Type: AWS::IAM::Role
+    Condition: CreateServer
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - transfer.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: TransferLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Sub: '*'
+  CustomIdentityProviderApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: Transfer Custom Identity Provider basic template API
+      Description: API used for GetUserConfig requests
+      FailOnWarnings: true
+      EndpointConfiguration:
+        Types:
+        - REGIONAL
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -135,17 +180,10 @@ Resources:
             - lambda.amazonaws.com
           Action:
           - sts:AssumeRole
-      Path: "/"
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-      - PolicyName: LambdaCWLoggingPolicy
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action:
-            - logs:*
-            Resource: arn:aws:logs:*:*:*
-      - PolicyName: SecretsManagerAccessPolicy
+      - PolicyName: LambdaSecretsPolicy
         PolicyDocument:
           Version: '2012-10-17'
           Statement:
@@ -153,15 +191,15 @@ Resources:
             Action:
             - secretsmanager:GetSecretValue
             Resource:
-            - !Ref AzureClientIdSecret
-            - !Ref AzureDomainSecret
-      Tags:
-        - Key: Name
-          Value: TransferFamily-LambdaExecutionRole
-        - Key: Purpose
-          Value: TransferFamily-LambdaExecutionRole
-  
-  TransferFamilyLoggingRole:
+              Fn::Sub:
+                - arn:aws:secretsmanager:${SecretsRegion}:${AWS::AccountId}:secret:SFTP/*
+                - SecretsRegion:
+                    Fn::If:
+                      - SecretsManagerRegionProvided
+                      - Ref: SecretsManagerRegion
+                      - Ref: AWS::Region
+  ApiCloudWatchLogsRole:
+    Description: IAM role used by API Gateway to log API requests to CloudWatch
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -170,12 +208,11 @@ Resources:
         - Effect: Allow
           Principal:
             Service:
-            - transfer.amazonaws.com
+            - apigateway.amazonaws.com
           Action:
           - sts:AssumeRole
-      Path: "/"
       Policies:
-      - PolicyName: AWSTransferLoggingPolicy
+      - PolicyName: ApiGatewayLogsPolicy
         PolicyDocument:
           Version: '2012-10-17'
           Statement:
@@ -183,16 +220,506 @@ Resources:
             Action:
             - logs:CreateLogGroup
             - logs:CreateLogStream
+            - logs:DescribeLogGroups
             - logs:DescribeLogStreams
             - logs:PutLogEvents
-            Resource: 'arn:aws:logs:*:*:log-group:/aws/transfer/*'
+            - logs:GetLogEvents
+            - logs:FilterLogEvents
+            Resource: "*"
+  ApiLoggingAccount:
+    Type: AWS::ApiGateway::Account
+    DependsOn:
+    - CustomIdentityProviderApi
+    Properties:
+      CloudWatchRoleArn:
+        Fn::GetAtt: ApiCloudWatchLogsRole.Arn
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId:
+        Ref: ApiDeployment
+      MethodSettings:
+      - DataTraceEnabled: false
+        HttpMethod: "*"
+        LoggingLevel: INFO
+        ResourcePath: "/*"
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      StageName: prod
+  ApiDeployment:
+    DependsOn:
+    - GetUserConfigRequest
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      StageName: dummystagefordeployment
+  TransferIdentityProviderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: transfer.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: TransferCanInvokeThisApi
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - execute-api:Invoke
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${CustomIdentityProviderApi}/prod/GET/*
+      - PolicyName: TransferCanReadThisApi
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - apigateway:GET
+            Resource: "*"
+  GetUserConfigLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile:
+          Fn::Sub: |
+            import json
+            import os
+            import urllib.request
+            import urllib.parse
+            import boto3
+            from botocore.exceptions import ClientError
+            secrets_client = boto3.client('secretsmanager')
+
+            # def get_secret(secret_name):
+            #     response = secrets_client.get_secret_value(SecretId=secret_name)
+            #     return response['SecretString']
+
+            def graph_api_request(url, data=None, headers=None):
+                if headers is None:
+                    headers = {}
+                req = urllib.request.Request(url, data=data, headers=headers)
+                try:
+                    with urllib.request.urlopen(req) as response:
+                        return json.loads(response.read().decode('utf-8'))
+                except urllib.error.HTTPError as error:
+                    print(f"HTTPError: {error}")
+                    print(f"HTTPError: {error.read()}")
+                    return False
+            def lambda_handler(event, context):
+                # print(f"event: {event}")
+                resp_data = {}
+
+                if 'username' not in event or 'serverId' not in event:
+                    print("Incoming username or serverId missing  - Unexpected")
+                    return response_data
+
+                # It is recommended to verify server ID against some value, this template does not verify server ID
+                input_username = event['username']
+                input_server_id = event['serverId']
+
+                if input_server_id not in os.environ['SERVER_IDs']:
+                    print(f"Unexpected server ID {input_server_id}")
+                    return {}
+                
+                if 'password' in event:
+                    input_password = event['password']
+                else:
+                    print("No password, checking for SSH public key")
+                    input_password = ''
+
+                azure_domain = os.environ['AzureADDomain']
+                azure_client_id = os.environ['AzureADClientID']
+                azure_tenant_id = os.environ['AzureADTenantID']
+                # azure_client_id_secret = os.environ['AzureADClientID']
+                # azure_domain_secret = os.environ['AzureADDomain']
+                # s3_bucket_name = os.environ['S3BucketName']
+                # s3_role_arn = os.environ['S3RoleARN']
+                # azure_domain = json.loads(get_secret(azure_domain_secret))[
+                #                           'AzureADDomain']
+                # azure_client_id = json.loads(get_secret(azure_client_id_secret))[
+                #                              'AzureADClientID']
+                user = f"{event['username']}@{azure_domain}"
+                print(f"user: {user}")
+                credentials = {
+                    'username': user,
+                    'password': event['password'],
+                    'grant_type': 'password',
+                    'scope': 'https://graph.microsoft.com/User.Read',
+                    'response_type': 'token',
+                    'client_id': azure_client_id
+                }
+                data = urllib.parse.urlencode(credentials).encode('utf-8')
+                url = f"https://login.microsoftonline.com/{azure_tenant_id}/oauth2/v2.0/token"
+
+                try:
+                    azure_token = graph_api_request(url=url, data=data, headers={
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    })
+                    # print(f"azure_token: {azure_token['access_token']}")
+                    if 'access_token' not in azure_token:
+                        print(
+                            f"Auth failure: {azure_token.get('error', 'Unknown error')}")
+                    else:
+                        print("Auth success")
+                except urllib.error.HTTPError as e:
+                    print(f"Auth failure: {e.read().decode('utf-8')}")
+                    return {}
+                
+                # Check user's group membership with groups which starts with sftp*
+                # try:
+                #     query_params = {
+                #     "$select": "id,displayName,mail,mailNickname",
+                #     "$filter": f"startswith(displayName,'sftp')"
+                #     }
+                #     full_url = f"https://graph.microsoft.com/v1.0/users/{user}/memberOf/microsoft.graph.group" + "?" + urllib.parse.urlencode(query_params)
+                #     print(f"full_url: {full_url}")
+                #     resp_data = graph_api_request(url=url, headers={
+                #         'Accept': 'application/json',
+                #         'Authorization': f"Bearer {azure_token['access_token']}"
+                #     })
+                #     print(f"resp_data: {resp_data}")
+                #     if resp_data:
+                #         groups = [group['id'] for group in resp_data['value']]
+                #         print(f"groups: {groups}")
+                #     else:
+                #         print("User not found or other error occurred")
+                #         return {}
+                # except urllib.error.HTTPError as e:
+                #     print(f"Error occurred while fetching group {e}")
+                #     return {}
+                # url = f"https://graph.microsoft.com/v1.0/users/{user}/memberOf/microsoft.graph.group?$select=displayName,id"
+                # req = urllib.request.Request(url, headers={
+                #         'Accept': 'application/json',
+                #         'Authorization': f"Bearer {azure_token['access_token']}"
+                #     })
+                # with urllib.request.urlopen(req) as response:
+                #     resp_data = json.loads(response.read().decode('utf-8'))
+                #         print(f"Response: {resp_data}")
+                    
+                
+                # Example variables
+                home_bucket = os.environ['S3BucketName']
+                home_directory = f"{home_bucket}/{azure_domain}/{user}"
+
+                policy = {
+                  'Version': '2012-10-17',
+                  'Statement': [
+                    {
+                      'Sid': 'allowFolderList',
+                      'Action': ['s3:ListBucket', 's3:GetBucketLocation'],
+                      'Effect': 'Allow',
+                      'Resource': [f'arn:aws:s3:::{home_bucket}']
+                    },
+                    {
+                      'Sid': 'allowListBuckets',
+                      'Effect': 'Allow',
+                      'Action': ['s3:ListAllMyBuckets', 's3:GetBucketLocation'],
+                      'Resource': '*'
+                    },
+                    {
+                      'Sid': 'HomeDirectoryAccess',
+                      'Effect': 'Allow',
+                      'Action': ['s3:PutObject', 's3:GetObject', 's3:DeleteObjectVersion', 's3:DeleteObject', 's3:GetObjectVersion'],
+                      'Resource': [f'arn:aws:s3:::{home_directory}/*']
+                    },
+                    {
+                      'Sid': 'DenyDeletionOfHomeDirectory',
+                      'Effect': 'Deny',
+                      'Action': ['s3:DeleteObjectVersion', 's3:DeleteObject'],
+                      'Resource': [f'arn:aws:s3:::{home_directory}/']
+                    }
+                  ]
+                }
+                return {
+                  "status": "success",
+                  'Policy': json.dumps(policy),
+                  # 'Role': s3_role_arn,
+                  # 'HomeDirectory': f'/{home_directory}'
+                }    
+      Description: A function to lookup and return user data from AWS Secrets Manager.
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt: LambdaExecutionRole.Arn
+      Runtime: python3.11
+      Environment:
+        Variables:
+          AzureADClientID: "67ea483e-da39-4644-8c86-bce4e1aa2334"
+          AzureADDomain: "hwsdev.biz"
+          AzureADTenantID: "9922c172-3c44-4662-9c4a-a0309c1e6d02"
+          SERVER_IDs: '["s-5c94ab8ef86d43ff8"]'
+          S3BucketName: !Ref EncryptedS3Bucket
+          S3RoleARN: !GetAtt S3TransferAccessRole.Arn
+          SecretsManagerRegion:
+            Fn::If:
+              - SecretsManagerRegionProvided
+              - Ref: SecretsManagerRegion
+              - Ref: AWS::Region
+  GetUserConfigLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunction
+      FunctionName:
+        Fn::GetAtt: GetUserConfigLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Join:
+        - ''
+        - - 'arn:aws:execute-api:'
+          - Ref: AWS::Region
+          - ":"
+          - Ref: AWS::AccountId
+          - ":"
+          - Ref: CustomIdentityProviderApi
+          - "/*"
+  ServersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      ParentId:
+        Fn::GetAtt:
+        - CustomIdentityProviderApi
+        - RootResourceId
+      PathPart: servers
+  ServerIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      ParentId:
+        Ref: ServersResource
+      PathPart: "{serverId}"
+  UsersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      ParentId:
+        Ref: ServerIdResource
+      PathPart: users
+  UserNameResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      ParentId:
+        Ref: UsersResource
+      PathPart: "{username}"
+  GetUserConfigResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      ParentId:
+        Ref: UserNameResource
+      PathPart: config
+  GetUserConfigRequest:
+    Type: AWS::ApiGateway::Method
+    DependsOn: GetUserConfigResponseModel
+    Properties:
+      AuthorizationType: AWS_IAM
+      HttpMethod: GET
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Join:
+          - ''
+          - - 'arn:aws:apigateway:'
+            - Ref: AWS::Region
+            - ":lambda:path/2015-03-31/functions/"
+            - Fn::GetAtt:
+              - GetUserConfigLambda
+              - Arn
+            - "/invocations"
+        IntegrationResponses:
+        - StatusCode: 200
+        RequestTemplates:
+          application/json: |
+            {
+              "username": "$input.params('username')",
+              "password": "$util.escapeJavaScript($input.params('Password')).replaceAll("\\'","'")",
+              "serverId": "$input.params('serverId')"
+            }
+      RequestParameters:
+        method.request.header.Password: false
+      ResourceId:
+        Ref: GetUserConfigResource
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      MethodResponses:
+      - StatusCode: 200
+        ResponseModels:
+          application/json: UserConfigResponseModel
+  GetUserConfigResponseModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      RestApiId:
+        Ref: CustomIdentityProviderApi
+      ContentType: application/json
+      Description: API response for GetUserConfig
+      Name: UserConfigResponseModel
+      Schema:
+        "$schema": http://json-schema.org/draft-04/schema#
+        title: UserUserConfig
+        type: object
+        properties:
+          HomeDirectory:
+            type: string
+          Role:
+            type: string
+          Policy:
+            type: string
+          PublicKeys:
+            type: array
+            items:
+              type: string
+  TrSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Internet connection to SFTPServer
+      VpcId: !ImportValue sftp-networksetup-VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - CidrIp: 127.0.0.1/32
+        IpProtocol: "-1"
       Tags:
-        - Key: Name
-          Value: TransferFamily-TransferFamilyLoggingRole
-        - Key: Purpose
-          Value: TransferFamily-TransferFamilyLoggingRole
+      - Key: Name
+        Value: sg-sftp-production
+  TrDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardBody:
+        !Sub
+        - '{
+            "widgets": [
+                {
+                    "type": "metric",
+                    "x": 0,
+                    "y": 0,
+                    "width": 12,
+                    "height": 3,
+                    "properties": {
+                        "metrics": [
+                            [ "AWS/Transfer", "BytesIn", "ServerId", "${TransferServerID}" ],
+                            [ ".", "BytesOut", ".", "." ]
+                        ],
+                        "view": "singleValue",
+                        "region": "${AWS::Region}",
+                        "stat": "Sum",
+                        "period": 604800,
+                        "title": "Transfer Bytes"
+                    }
+                },
+                {
+                    "type": "log",
+                    "x": 0,
+                    "y": 3,
+                    "width": 12,
+                    "height": 6,
+                    "properties": {
+                        "query": "SOURCE ''/aws/transfer/${TransferServerID}'' | filter @message like \"OPEN\" | parse @message \"*.* OPEN Path=* Mode=*\" as user, sessionID, path, mode | fields @timestamp | sort @timestamp desc | stats count_distinct(sessionID) as uniquesessions by bin(10min)",
+                        "region": "${AWS::Region}",
+                        "title": "Unique Sessions",
+                        "view": "bar"
+                    }
+                },
+                {
+                    "type": "log",
+                    "x": 12,
+                    "y": 12,
+                    "width": 12,
+                    "height": 6,
+                    "properties": {
+                        "query": "SOURCE ''/aws/transfer/${TransferServerID}'' | filter @message like \"READ\" | fields @timestamp | sort @timestamp desc | stats count(*) as FileRead by bin(10min)",
+                        "region": "${AWS::Region}",
+                        "title": "Get Operations",
+                        "view": "bar"
+                    }
+                },
+                {
+                    "type": "log",
+                    "x": 12,
+                    "y": 6,
+                    "width": 12,
+                    "height": 6,
+                    "properties": {
+                        "query": "SOURCE ''/aws/transfer/${TransferServerID}'' | filter @message like \"WRITE\" | fields @timestamp | sort @timestamp desc | stats count(*) as FileWrite by bin(10min)",
+                        "region": "${AWS::Region}",
+                        "stacked": false,
+                        "title": "Put Operations",
+                        "view": "bar"
+                    }
+                },
+                {
+                    "type": "log",
+                    "x": 0,
+                    "y": 9,
+                    "width": 12,
+                    "height": 9,
+                    "properties": {
+                        "query": "SOURCE ''/aws/transfer/${TransferServerID}'' | filter @message like \"ERROR\" | fields @timestamp | sort @timestamp desc | stats count(*) as Errors by bin(24hr)",
+                        "region": "${AWS::Region}",
+                        "title": "Error Count",
+                        "view": "bar"
+                    }
+                },
+                {
+                    "type": "log",
+                    "x": 12,
+                    "y": 0,
+                    "width": 12,
+                    "height": 6,
+                    "properties": {
+                        "query": "SOURCE ''/aws/transfer/${TransferServerID}'' | filter @message like \"OPEN\" | parse @message \"*.* OPEN Path=* Mode=*\" as user, sessionID, path, mode | fields @timestamp | filter mode like \"READ\" | sort path desc | stats count(path) as NumberOfRequests by path | limit 10",
+                        "region": "${AWS::Region}",
+                        "title": "Top File Downloads",
+                        "view": "table"
+                    }
+                }
+            ]}'
+        - TransferServerID: !GetAtt TransferServer.ServerId
 
 Outputs:
-  EIPs:
-    Description: Comma separated list of all Elastic IPs
-    Value: !Join [",", [!Ref EIP1, !Ref EIP2]]
+  ServerId:
+    Value:
+      Fn::GetAtt: TransferServer.ServerId
+    Condition: CreateServer
+  ServerEndpoint:
+    Value:
+      Fn::Join:
+      - ''
+      - - Fn::GetAtt: TransferServer.ServerId
+        - .server.transfer.
+        - Ref: AWS::Region
+        - .amazonaws.com
+  TransferIdentityProviderUrl:
+    Description: URL to pass to AWS Transfer CreateServer call as part of optional IdentityProviderDetails
+    Value:
+      Fn::Join:
+      - ''
+      - - https://
+        - Ref: CustomIdentityProviderApi
+        - .execute-api.
+        - Ref: AWS::Region
+        - .amazonaws.com/
+        - Ref: ApiStage
+  TransferIdentityProviderInvocationRole:
+    Description: IAM Role to pass to AWS Transfer CreateServer call as part of optional IdentityProviderDetails
+    Value:
+      Fn::GetAtt: TransferIdentityProviderRole.Arn
+  CloudWatchDashboard:
+    Value: !Ref TrDashboard
+...

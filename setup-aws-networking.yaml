@@ -88,7 +88,22 @@ Resources:
           Value: !Ref PublicSubnet2BitMask
         - Key: availabilityzone
           Value: !Select [1, Fn::GetAZs: !Ref "AWS::Region"]
-
+  TransferFamilySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow only inbound transfers from VPC CIDR block
+      VpcId: !GetAtt VPCProvisionedProduct.Outputs.vpcvpcidF3B8DA19
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+          Description: Allow SFTP access from internet
+      Tags:
+        - Key: short_name
+          Value: !Ref VpcName
+        - Key: Name
+          Value: TransferFamilySG
 Outputs:
   VPCId:
     Description: The ID of the VPC
@@ -105,4 +120,9 @@ Outputs:
     Value: !GetAtt PublicSubnet2ProvisionedProduct.Outputs.subnetid
     Export:
       Name: !Sub ${AWS::StackName}-Subnet2Id
+  SecurityGroupId:
+    Description: The ID of the Security Group
+    Value: !GetAtt TransferFamilySecurityGroup.GroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-SecurityGroupId
 
