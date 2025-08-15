@@ -1,18 +1,22 @@
 [
   {
-    "ParameterKey": "VPCId",
-    "ParameterValue": "<imported-or-existing-vpc-id-or-!ImportValue>"
+    "ParameterKey": "CreateServer",
+    "ParameterValue": "true"
   },
   {
-    "ParameterKey": "AzureClientId",
+    "ParameterKey": "SecretsManagerRegion",
+    "ParameterValue": "eu-central-1"
+  },
+  {
+    "ParameterKey": "AzureADClientID",
     "ParameterValue": "<your-azure-client-id>"
   },
   {
-    "ParameterKey": "AzureDomain",
+    "ParameterKey": "AzureADDomain",
     "ParameterValue": "<your-azure-domain>"
   },
   {
-    "ParameterKey": "S3BucketName",
-    "ParameterValue": "<your-s3-bucket-name>"
+    "ParameterKey": "AzureADTenantID",
+    "ParameterValue": "<your-azure-tenant-id>"
   }
 ]
