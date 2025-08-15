@@ -14,6 +14,16 @@ Parameters:
     Type: String
     Description: (Optional) The region the secrets are stored in.
     Default: 'eu-central-1'
+  AzureADClientID:
+    Type: String
+    Description: The client ID of the Azure AD application.
+  AzureADTenantID:
+    Type: String
+    Description: The tenant ID of the Azure AD tenant.
+  AzureADDomain:
+    Type: String
+    Description: The domain of the Azure AD tenant.
+
 Conditions:
   CreateServer:
     Fn::Equals:
@@ -28,6 +38,32 @@ Conditions:
           - Ref: SecretsManagerRegion
           - ''
 Resources:
+  # Use SecretManager for AzureADClientID, AzureADTenantID, AzureADDomain
+  AzureADClientIDSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: SFTP/AzureADClientID
+      Description: The client ID of the Azure AD application.
+      SecretString: !Sub 
+        - '{"AzureADClientID": "${ClientIDParam}" }'
+        - ClientIDParam: !Ref AzureADClientID
+  AzureADTenantIDSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: SFTP/AzureADTenantID
+      Description: The tenant ID of the Azure AD tenant.
+      SecretString: !Sub 
+        - '{"AzureADTenantID": "${TenantIDParam}" }'
+        - TenantIDParam: !Ref AzureADTenantID
+  AzureADDomainSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: SFTP/AzureADDomain
+      Description: The domain of the Azure AD tenant.
+      SecretString: !Sub 
+        - '{"AzureADDomain": "${DomainParam}" }'
+        - DomainParam: !Ref AzureADDomain
+
   #Elastic IPs to be used for SFTP server. Two IPs used for HA
   EIPTran01:
     Type: AWS::EC2::EIP
@@ -53,10 +89,7 @@ Resources:
         Rules:
         - Id: GlacierRule
           Status: Enabled
-          ExpirationInDays: '400'
-          Transitions:
-            - TransitionInDays: '90'
-              StorageClass: GLACIER
+          ExpirationInDays: '30'
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -84,8 +117,16 @@ Resources:
         - Effect: Allow
           Action:
             - s3:ListBucket
+          Resource: !GetAtt EncryptedS3Bucket.Arn
+        - Effect: Allow
+          Action:
             - s3:GetBucketLocation
           Resource: !GetAtt EncryptedS3Bucket.Arn
+        - Effect: Allow
+          Action:
+            - s3:ListAllMyBuckets
+            - s3:GetBucketLocation
+          Resource: "*"
         - Effect: Allow
           Action:
           - s3:PutObject
@@ -96,6 +137,28 @@ Resources:
           Resource: !Sub "${EncryptedS3Bucket.Arn}/*"
       Roles:
       - !Ref S3TransferAccessRole
+  TransferFamilyGroupAccessTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-group-access'
+      AttributeDefinitions:
+      - AttributeName: Id
+        AttributeType: S
+      - AttributeName: Directory
+        AttributeType: S
+      KeySchema:
+      - AttributeName: Id
+        KeyType: HASH
+      - AttributeName: Directory
+        KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      Tags:
+        - Key: Name
+          Value: TransferFamilyGroupAccessTable
+        - Key: Purpose
+          Value: TransferFamilyGroupAccessTable
   #Creation of SFTP server
   TransferServer:
     Type : AWS::Transfer::Server
@@ -127,6 +190,7 @@ Resources:
               - .amazonaws.com/
               - Ref: ApiStage
       IdentityProviderType: API_GATEWAY
+      PreAuthenticationLoginBanner: "This system is for the use of authorized users only. Individuals using this computer system without authority, or in excess of their authority, are subject to having all of their activities on this system monitored and recorded by system personnel."
       LoggingRole:
         Fn::GetAtt: CloudWatchLoggingRole.Arn
       Tags:
@@ -162,7 +226,7 @@ Resources:
   CustomIdentityProviderApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
-      Name: Transfer Custom Identity Provider basic template API
+      Name: Transfer Custom Identity Provider API
       Description: API used for GetUserConfig requests
       FailOnWarnings: true
       EndpointConfiguration:
@@ -198,6 +262,20 @@ Resources:
                       - SecretsManagerRegionProvided
                       - Ref: SecretsManagerRegion
                       - Ref: AWS::Region
+      - PolicyName: LambdaDynamoDBPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:Scan
+            Resource:
+              Fn::Sub:
+                - arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}
+                - tableName: !Ref TransferFamilyGroupAccessTable
+
   ApiCloudWatchLogsRole:
     Description: IAM role used by API Gateway to log API requests to CloudWatch
     Type: AWS::IAM::Role
@@ -230,6 +308,7 @@ Resources:
     Type: AWS::ApiGateway::Account
     DependsOn:
     - CustomIdentityProviderApi
+    - ApiCloudWatchLogsRole
     Properties:
       CloudWatchRoleArn:
         Fn::GetAtt: ApiCloudWatchLogsRole.Arn
@@ -238,14 +317,30 @@ Resources:
     Properties:
       DeploymentId:
         Ref: ApiDeployment
-      MethodSettings:
-      - DataTraceEnabled: false
-        HttpMethod: "*"
-        LoggingLevel: INFO
-        ResourcePath: "/*"
       RestApiId:
         Ref: CustomIdentityProviderApi
       StageName: prod
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayAccessLogGroup.Arn
+        Format: '{ "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "caller":"$context.identity.caller", "user":"$context.identity.user","requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath", "status":"$context.status","protocol":"$context.protocol", "responseLength":"$context.responseLength" }'
+      MethodSettings:
+        - DataTraceEnabled: false
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          ResourcePath: '/*'
+          MetricsEnabled: true
+  # Add CloudWatch Log Group for API Gateway Access Logs
+  ApiGatewayAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${CustomIdentityProviderApi}/access-logs'
+      RetentionInDays: 7
+  # Add CloudWatch Log Group for API Gateway Execution Logs
+  ApiGatewayExecutionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${CustomIdentityProviderApi}/execution-logs'
+      RetentionInDays: 7
   ApiDeployment:
     DependsOn:
     - GetUserConfigRequest
@@ -296,10 +391,22 @@ Resources:
             import boto3
             from botocore.exceptions import ClientError
             secrets_client = boto3.client('secretsmanager')
+            dynamodb = boto3.client('dynamodb')
 
-            # def get_secret(secret_name):
-            #     response = secrets_client.get_secret_value(SecretId=secret_name)
-            #     return response['SecretString']
+            def get_secret(secret_name):
+                response = secrets_client.get_secret_value(SecretId=secret_name)
+                return response['SecretString']
+
+            def dynamodb_put_item(table_name, item):
+                dynamodb.put_item(TableName=table_name, Item=item)
+
+            def dynamodb_get_item(table_name, key):
+                response = dynamodb.get_item(TableName=table_name, Key=key)
+                return response.get('Item')
+
+            def dynamodb_search_item(table_name, key):
+                response = dynamodb.scan(TableName=table_name, ScanFilter=key)
+                return response.get('Items')
 
             def graph_api_request(url, data=None, headers=None):
                 if headers is None:
@@ -312,8 +419,8 @@ Resources:
                     print(f"HTTPError: {error}")
                     print(f"HTTPError: {error.read()}")
                     return False
+
             def lambda_handler(event, context):
-                # print(f"event: {event}")
                 resp_data = {}
 
                 if 'username' not in event or 'serverId' not in event:
@@ -322,31 +429,22 @@ Resources:
 
                 # It is recommended to verify server ID against some value, this template does not verify server ID
                 input_username = event['username']
-                input_server_id = event['serverId']
-
-                if input_server_id not in os.environ['SERVER_IDs']:
-                    print(f"Unexpected server ID {input_server_id}")
-                    return {}
-                
                 if 'password' in event:
                     input_password = event['password']
                 else:
                     print("No password, checking for SSH public key")
                     input_password = ''
-
-                azure_domain = os.environ['AzureADDomain']
-                azure_client_id = os.environ['AzureADClientID']
-                azure_tenant_id = os.environ['AzureADTenantID']
-                # azure_client_id_secret = os.environ['AzureADClientID']
-                # azure_domain_secret = os.environ['AzureADDomain']
-                # s3_bucket_name = os.environ['S3BucketName']
-                # s3_role_arn = os.environ['S3RoleARN']
-                # azure_domain = json.loads(get_secret(azure_domain_secret))[
-                #                           'AzureADDomain']
-                # azure_client_id = json.loads(get_secret(azure_client_id_secret))[
-                #                              'AzureADClientID']
-                user = f"{event['username']}@{azure_domain}"
-                print(f"user: {user}")
+                
+                # Use SecretManager to get these values
+                azure_client_id = json.loads(get_secret("SFTP/AzureADClientID"))['AzureADClientID']
+                azure_domain = json.loads(get_secret("SFTP/AzureADDomain"))['AzureADDomain']
+                azure_tenant_id = json.loads(get_secret("SFTP/AzureADTenantID"))['AzureADTenantID']
+               
+                s3_bucket_name = os.environ['S3BucketName']
+                s3_role_arn = os.environ['S3RoleARN']
+                user = f"{input_username}@{azure_domain}"
+                print(f"Authenticating user: {user}")
+                
                 credentials = {
                     'username': user,
                     'password': event['password'],
@@ -363,87 +461,118 @@ Resources:
                         'Accept': 'application/json',
                         'Content-Type': 'application/x-www-form-urlencoded'
                     })
-                    # print(f"azure_token: {azure_token['access_token']}")
                     if 'access_token' not in azure_token:
                         print(
                             f"Auth failure: {azure_token.get('error', 'Unknown error')}")
-                    else:
-                        print("Auth success")
+                        return {}
+                        
                 except urllib.error.HTTPError as e:
                     print(f"Auth failure: {e.read().decode('utf-8')}")
                     return {}
-                
+
                 # Check user's group membership with groups which starts with sftp*
-                # try:
-                #     query_params = {
-                #     "$select": "id,displayName,mail,mailNickname",
-                #     "$filter": f"startswith(displayName,'sftp')"
-                #     }
-                #     full_url = f"https://graph.microsoft.com/v1.0/users/{user}/memberOf/microsoft.graph.group" + "?" + urllib.parse.urlencode(query_params)
-                #     print(f"full_url: {full_url}")
-                #     resp_data = graph_api_request(url=url, headers={
-                #         'Accept': 'application/json',
-                #         'Authorization': f"Bearer {azure_token['access_token']}"
-                #     })
-                #     print(f"resp_data: {resp_data}")
-                #     if resp_data:
-                #         groups = [group['id'] for group in resp_data['value']]
-                #         print(f"groups: {groups}")
-                #     else:
-                #         print("User not found or other error occurred")
-                #         return {}
-                # except urllib.error.HTTPError as e:
-                #     print(f"Error occurred while fetching group {e}")
-                #     return {}
-                # url = f"https://graph.microsoft.com/v1.0/users/{user}/memberOf/microsoft.graph.group?$select=displayName,id"
-                # req = urllib.request.Request(url, headers={
-                #         'Accept': 'application/json',
-                #         'Authorization': f"Bearer {azure_token['access_token']}"
-                #     })
-                # with urllib.request.urlopen(req) as response:
-                #     resp_data = json.loads(response.read().decode('utf-8'))
-                #         print(f"Response: {resp_data}")
-                    
+                try:
+                    full_url = f"https://graph.microsoft.com/v1.0/users/{user}/memberOf/microsoft.graph.group?$select=displayName,id"
+                    resp_data = graph_api_request(url=full_url, headers={
+                        'Accept': 'application/json',
+                        'Authorization': f"Bearer {azure_token['access_token']}"
+                    })
+                    if resp_data and 'value' in resp_data:
+                        sftp_groups = [group for group in resp_data['value']
+                                      if 'sftp' in group.get('displayName', '').lower()]
+                    else:
+                        print("Groups not found or other error occurred")
+                        return {}
+                except urllib.error.HTTPError as e:
+                    print(f"Error occurred while fetching group {e}")
+                    return {}
+
+                # Check if the Group is already in the DynamoDB table
+                dynamodb_table_name = os.environ['DynamoDBTableName']
+                home_directory = f"{s3_bucket_name}/{azure_domain}/{user}"
+                directory_resources = []
+                directory_resources.append(f'arn:aws:s3:::{home_directory}/*')
+                allowed_prefixes = [
+                    "",
+                ]
+                # Add group directories
+                for group in sftp_groups:
+                    group_id = group['id']
+                    group_name = group.get('displayName', '')
+                    key = {'Id': {'S': group_id}, 'Directory': {'S': group_name}}
+                    group_item = dynamodb_get_item(table_name=dynamodb_table_name, key=key)
+                    if group_item:
+                        group_directory = group_item.get('Directory', {}).get('S', '')
+                        directory_resources.append(f'arn:aws:s3:::{s3_bucket_name}/{azure_domain}/{group_directory}/*')
+                        allowed_prefixes.append(f"{azure_domain}/{group_directory}/*")
+                        print(f"prefixes: {allowed_prefixes}")
+                    else:
+                        print(f"No directory found for group {group_name}")
                 
-                # Example variables
-                home_bucket = os.environ['S3BucketName']
-                home_directory = f"{home_bucket}/{azure_domain}/{user}"
+                print(f"directory_resources: {directory_resources}")
+                print(f"allowed_prefixes: {allowed_prefixes}")
 
                 policy = {
-                  'Version': '2012-10-17',
-                  'Statement': [
-                    {
-                      'Sid': 'allowFolderList',
-                      'Action': ['s3:ListBucket', 's3:GetBucketLocation'],
-                      'Effect': 'Allow',
-                      'Resource': [f'arn:aws:s3:::{home_bucket}']
-                    },
-                    {
-                      'Sid': 'allowListBuckets',
-                      'Effect': 'Allow',
-                      'Action': ['s3:ListAllMyBuckets', 's3:GetBucketLocation'],
-                      'Resource': '*'
-                    },
-                    {
-                      'Sid': 'HomeDirectoryAccess',
-                      'Effect': 'Allow',
-                      'Action': ['s3:PutObject', 's3:GetObject', 's3:DeleteObjectVersion', 's3:DeleteObject', 's3:GetObjectVersion'],
-                      'Resource': [f'arn:aws:s3:::{home_directory}/*']
-                    },
-                    {
-                      'Sid': 'DenyDeletionOfHomeDirectory',
-                      'Effect': 'Deny',
-                      'Action': ['s3:DeleteObjectVersion', 's3:DeleteObject'],
-                      'Resource': [f'arn:aws:s3:::{home_directory}/']
-                    }
-                  ]
+                    'Version': '2012-10-17',
+                    'Statement': [
+                        {
+                            'Sid': 'AllowRootAndDomainListing',
+                            'Effect': 'Allow',
+                            'Action': ['s3:ListBucket', 's3:GetBucketLocation'],
+                            'Resource': [f'arn:aws:s3:::{s3_bucket_name}'],
+                            'Condition': {
+                                'StringEquals': {
+                                    's3:prefix': allowed_prefixes
+                                }
+                            }
+                        },
+                        {
+                            'Sid': 'AllowUserHomeDirectoryListing',
+                            'Effect': 'Allow',
+                            'Action': ['s3:ListBucket', 's3:GetBucketLocation'],
+                            'Resource': [f'arn:aws:s3:::{s3_bucket_name}']
+                        },
+                        {
+                            'Sid': 'AllowUserHomeAccess',
+                            'Effect': 'Allow',
+                            'Action': [
+                                's3:PutObject',
+                                's3:GetObject',
+                                's3:DeleteObjectVersion',
+                                's3:DeleteObject',
+                                's3:GetObjectVersion'
+                            ],
+                            'Resource': [f'arn:aws:s3:::{home_directory}/*']
+                        },
+                        {
+                            'Sid': 'AllowGroupDirectoryAccess',
+                            'Effect': 'Allow',
+                            'Action': [
+                                's3:GetObject',
+                                's3:PutObject',
+                                's3:DeleteObject',
+                                's3:DeleteObjectVersion',
+                                's3:GetObjectVersion'
+                            ],
+                            'Resource': directory_resources
+                        },
+                        {
+                            'Sid': 'DenyDeletionOfHomeDirectory',
+                            'Effect': 'Deny',
+                            'Action': ['s3:DeleteObjectVersion', 's3:DeleteObject'],
+                            'Resource': [f'arn:aws:s3:::{home_directory}/']
+                        }
+                    ]
                 }
-                return {
-                  "status": "success",
-                  'Policy': json.dumps(policy),
-                  # 'Role': s3_role_arn,
-                  # 'HomeDirectory': f'/{home_directory}'
-                }    
+                response = {
+                    "status": "success",
+                    "Policy": json.dumps(policy),
+                    "Role": s3_role_arn,
+                    "HomeDirectory" : f"/{s3_bucket_name}/{azure_domain}/{user}"
+                }
+                # Do not log sensitive information such as passwords
+                print(f"response: {response}")
+                return response
       Description: A function to lookup and return user data from AWS Secrets Manager.
       Handler: index.lambda_handler
       Role:
@@ -451,12 +580,12 @@ Resources:
       Runtime: python3.11
       Environment:
         Variables:
-          AzureADClientID: "67ea483e-da39-4644-8c86-bce4e1aa2334"
-          AzureADDomain: "hwsdev.biz"
-          AzureADTenantID: "9922c172-3c44-4662-9c4a-a0309c1e6d02"
-          SERVER_IDs: '["s-5c94ab8ef86d43ff8"]'
+          AzureADClientID: ${AzureADClientID}
+          AzureADDomain: ${AzureADDomain}
+          AzureADTenantID: ${AzureADTenantID}
           S3BucketName: !Ref EncryptedS3Bucket
           S3RoleARN: !GetAtt S3TransferAccessRole.Arn
+          DynamoDBTableName: !Ref TransferFamilyGroupAccessTable
           SecretsManagerRegion:
             Fn::If:
               - SecretsManagerRegionProvided
@@ -523,12 +652,11 @@ Resources:
       PathPart: config
   GetUserConfigRequest:
     Type: AWS::ApiGateway::Method
-    DependsOn: GetUserConfigResponseModel
     Properties:
       AuthorizationType: AWS_IAM
       HttpMethod: GET
       Integration:
-        Type: AWS
+        Type: AWS_PROXY
         IntegrationHttpMethod: POST
         Uri:
           Fn::Join:
@@ -546,8 +674,8 @@ Resources:
           application/json: |
             {
               "username": "$input.params('username')",
-              "password": "$util.escapeJavaScript($input.params('Password')).replaceAll("\\'","'")",
-              "serverId": "$input.params('serverId')"
+              "serverId": "$input.params('serverId')",
+              "password": "$util.escapeJavaScript($input.params('Password')).replaceAll(".*", "********")"
             }
       RequestParameters:
         method.request.header.Password: false
@@ -569,19 +697,26 @@ Resources:
       Name: UserConfigResponseModel
       Schema:
         "$schema": http://json-schema.org/draft-04/schema#
-        title: UserUserConfig
+        title: UserConfigResponse
         type: object
         properties:
-          HomeDirectory:
+          status:
             type: string
           Role:
             type: string
           Policy:
             type: string
-          PublicKeys:
+          HomeDirectoryType:
+            type: string
+          HomeDirectoryMappings:
             type: array
             items:
-              type: string
+              type: object
+              properties:
+                Entry:
+                  type: string
+                Target:
+                  type: string
   TrSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -722,4 +857,3 @@ Outputs:
       Fn::GetAtt: TransferIdentityProviderRole.Arn
   CloudWatchDashboard:
     Value: !Ref TrDashboard
-...
