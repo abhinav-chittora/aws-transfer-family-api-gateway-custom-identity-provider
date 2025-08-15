@@ -180,15 +180,10 @@ Resources:
       IdentityProviderDetails:
         InvocationRole:
           Fn::GetAtt: TransferIdentityProviderRole.Arn
-        Url:
-          Fn::Join:
-            - ''
-            - - https://
-              - Ref: CustomIdentityProviderApi
-              - .execute-api.
-              - Ref: AWS::Region
-              - .amazonaws.com/
-              - Ref: ApiStage
+        Url: !Sub 
+          - "https://${CustomIdentityProviderApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiStage}"
+          - CustomIdentityProviderApi: !Ref CustomIdentityProviderApi
+            ApiStage: !Ref ApiStage
       IdentityProviderType: API_GATEWAY
       PreAuthenticationLoginBanner: "This system is for the use of authorized users only. Individuals using this computer system without authority, or in excess of their authority, are subject to having all of their activities on this system monitored and recorded by system personnel."
       LoggingRole:
@@ -446,7 +441,7 @@ Resources:
                     return {}
 
                 return azure_token['access_token']
-            
+
             def get_user_groups(username, access_token, tenant_id):
                 try:
                     full_url = f"https://graph.microsoft.com/v1.0/users/{username}/memberOf/microsoft.graph.group?$select=displayName,id"
@@ -466,13 +461,15 @@ Resources:
                 
                 return sftp_groups
 
-            def get_additional_directory_prefixes(dynamodb_table_name, sftp_groups, s3_bucket_name, azure_domain, home_directory):
+            def get_additional_directory_prefixes(dynamodb_table_name, home_directory, s3_bucket_name, azure_domain=None,sftp_groups=None):
                 directory_resources = []
                 directory_resources.append(f'arn:aws:s3:::{home_directory}/*')
                 allowed_prefixes = [
                     "",
                 ]
                 # Add group directories
+                if sftp_groups is None:
+                    sftp_groups = []
                 for group in sftp_groups:
                     group_id = group['id']
                     group_name = group.get('displayName', '')
@@ -548,20 +545,18 @@ Resources:
 
             def lambda_handler(event, context):
                 resp_data = {}
-                print(f"Event: {event}")
+
                 # Standard Variables for SFTP Auth
                 s3_bucket_name = os.environ['S3BucketName']
                 s3_role_arn = os.environ['S3RoleARN']    
                 dynamodb_table_name = os.environ['DynamoDBTableName']
-                input_protocol = event.get('Protocol', 'SFTP')  
 
                 # Validation of Inputs and Events
                 if 'username' not in event or 'serverId' not in event:
                     print("Incoming username or serverId missing  - Unexpected")
                     return resp_data
-                if 'password' in event:
-                    input_password = event['password']
-                    
+                if 'password' in event and event['password'] != "":
+                    input_password = event['password']        
                     # Use SecretManager to get these values
                     azure_client_id = json.loads(get_secret("SFTP/AzureADClientID"))['AzureADClientID']
                     azure_domain = json.loads(get_secret("SFTP/AzureADDomain"))['AzureADDomain']
@@ -575,7 +570,7 @@ Resources:
                         print(f"Auth failure: {e.read().decode('utf-8')}")
                         return resp_data
                     sftp_groups = get_user_groups(user, access_token, azure_tenant_id)
-                    allowed_prefixes, directory_resources = get_additional_directory_prefixes(dynamodb_table_name, sftp_groups, s3_bucket_name, azure_domain, home_directory)
+                    allowed_prefixes, directory_resources = get_additional_directory_prefixes(dynamodb_table_name=dynamodb_table_name, sftp_groups=sftp_groups, s3_bucket_name=s3_bucket_name, azure_domain=azure_domain, home_directory=home_directory)
                     user_scoped_s3_policy = generate_s3_policy(s3_bucket_name, home_directory, allowed_prefixes, directory_resources)
                     resp_data = {
                         "Status": "success",
@@ -586,7 +581,32 @@ Resources:
                 else:
                     print("No password, checking for SSH public key")
                     input_password = ''
+                    user = event['username']
+                    home_directory = f"{s3_bucket_name}/{user}"
+                    # Check DynamoDB for SSH Public Key
+                    key = {'Id': {'S': user}, 'Directory': {'S': user}}
+                    user_item = dynamodb_get_item(table_name=dynamodb_table_name, key=key)
+                    if user_item:
+                        ssh_public_key = user_item.get('SSHPublicKey', {}).get('S', '')
+                        if ssh_public_key:
+                            print(f"SSH Public Key found for user {user}")
 
+                            allowed_prefixes, directory_resources = get_additional_directory_prefixes(dynamodb_table_name=dynamodb_table_name, s3_bucket_name=s3_bucket_name, home_directory=home_directory)
+                            user_scoped_s3_policy = generate_s3_policy(s3_bucket_name, home_directory, allowed_prefixes, directory_resources)
+                            resp_data = {
+                                "Status": "success",
+                                "Role": s3_role_arn,
+                                "Policy": json.dumps(user_scoped_s3_policy),
+                                "HomeDirectory" : f"/{s3_bucket_name}/{user}",
+                                "PublicKeys": [ssh_public_key]
+                            }
+                        else:
+                            print(f"No SSH Public Key found for user {user}")
+                            resp_data = {
+                                "Status": "failure",
+                                "Message": "No SSH Public Key found for user"
+                            }
+                print(f"Response: {resp_data}")
                 return resp_data
       Description: A function to lookup and return user data from AWS Secrets Manager.
       Handler: index.lambda_handler
@@ -671,7 +691,7 @@ Resources:
       AuthorizationType: AWS_IAM
       HttpMethod: GET
       Integration:
-        Type: AWS_PROXY
+        Type: AWS
         IntegrationHttpMethod: POST
         Uri:
           Fn::Join:
@@ -690,18 +710,25 @@ Resources:
             {
               "username": "$input.params('username')",
               "serverId": "$input.params('serverId')",
-              "password": "$util.escapeJavaScript($input.params('Password')).replaceAll(".*", "********")"
+              "password": "$util.escapeJavaScript($input.params('Password')).replaceAll(".*", "********")",
+              "protocol": "$input.params('protocol')",
+              "sourceIp": "$input.params('sourceIp')"
             }
+        PassthroughBehavior: WHEN_NO_TEMPLATES
       RequestParameters:
         method.request.header.Password: false
-      ResourceId:
-        Ref: GetUserConfigResource
-      RestApiId:
-        Ref: CustomIdentityProviderApi
+        method.request.querystring.protocol: false
+        method.request.querystring.sourceIp: false
+        method.request.path.username: true
+        method.request.path.serverId: true
       MethodResponses:
       - StatusCode: 200
         ResponseModels:
           application/json: UserConfigResponseModel
+      ResourceId:
+        Ref: GetUserConfigResource
+      RestApiId:
+        Ref: CustomIdentityProviderApi
   GetUserConfigResponseModel:
     Type: AWS::ApiGateway::Model
     Properties:
