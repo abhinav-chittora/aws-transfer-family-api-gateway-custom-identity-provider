@@ -275,7 +275,6 @@ Resources:
               Fn::Sub:
                 - arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}
                 - tableName: !Ref TransferFamilyGroupAccessTable
-
   ApiCloudWatchLogsRole:
     Description: IAM role used by API Gateway to log API requests to CloudWatch
     Type: AWS::IAM::Role
@@ -420,41 +419,17 @@ Resources:
                     print(f"HTTPError: {error.read()}")
                     return False
 
-            def lambda_handler(event, context):
-                resp_data = {}
-
-                if 'username' not in event or 'serverId' not in event:
-                    print("Incoming username or serverId missing  - Unexpected")
-                    return response_data
-
-                # It is recommended to verify server ID against some value, this template does not verify server ID
-                input_username = event['username']
-                if 'password' in event:
-                    input_password = event['password']
-                else:
-                    print("No password, checking for SSH public key")
-                    input_password = ''
-                
-                # Use SecretManager to get these values
-                azure_client_id = json.loads(get_secret("SFTP/AzureADClientID"))['AzureADClientID']
-                azure_domain = json.loads(get_secret("SFTP/AzureADDomain"))['AzureADDomain']
-                azure_tenant_id = json.loads(get_secret("SFTP/AzureADTenantID"))['AzureADTenantID']
-               
-                s3_bucket_name = os.environ['S3BucketName']
-                s3_role_arn = os.environ['S3RoleARN']
-                user = f"{input_username}@{azure_domain}"
-                print(f"Authenticating user: {user}")
-                
+            def get_user_access_token(username, password, client_id, tenant_id):
                 credentials = {
-                    'username': user,
-                    'password': event['password'],
+                    'username': username,
+                    'password': password,
                     'grant_type': 'password',
                     'scope': 'https://graph.microsoft.com/User.Read',
                     'response_type': 'token',
-                    'client_id': azure_client_id
+                    'client_id': client_id
                 }
                 data = urllib.parse.urlencode(credentials).encode('utf-8')
-                url = f"https://login.microsoftonline.com/{azure_tenant_id}/oauth2/v2.0/token"
+                url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 
                 try:
                     azure_token = graph_api_request(url=url, data=data, headers={
@@ -470,12 +445,14 @@ Resources:
                     print(f"Auth failure: {e.read().decode('utf-8')}")
                     return {}
 
-                # Check user's group membership with groups which starts with sftp*
+                return azure_token['access_token']
+            
+            def get_user_groups(username, access_token, tenant_id):
                 try:
-                    full_url = f"https://graph.microsoft.com/v1.0/users/{user}/memberOf/microsoft.graph.group?$select=displayName,id"
+                    full_url = f"https://graph.microsoft.com/v1.0/users/{username}/memberOf/microsoft.graph.group?$select=displayName,id"
                     resp_data = graph_api_request(url=full_url, headers={
                         'Accept': 'application/json',
-                        'Authorization': f"Bearer {azure_token['access_token']}"
+                        'Authorization': f"Bearer {access_token}"
                     })
                     if resp_data and 'value' in resp_data:
                         sftp_groups = [group for group in resp_data['value']
@@ -486,10 +463,10 @@ Resources:
                 except urllib.error.HTTPError as e:
                     print(f"Error occurred while fetching group {e}")
                     return {}
+                
+                return sftp_groups
 
-                # Check if the Group is already in the DynamoDB table
-                dynamodb_table_name = os.environ['DynamoDBTableName']
-                home_directory = f"{s3_bucket_name}/{azure_domain}/{user}"
+            def get_additional_directory_prefixes(dynamodb_table_name, sftp_groups, s3_bucket_name, azure_domain, home_directory):
                 directory_resources = []
                 directory_resources.append(f'arn:aws:s3:::{home_directory}/*')
                 allowed_prefixes = [
@@ -505,14 +482,17 @@ Resources:
                         group_directory = group_item.get('Directory', {}).get('S', '')
                         directory_resources.append(f'arn:aws:s3:::{s3_bucket_name}/{azure_domain}/{group_directory}/*')
                         allowed_prefixes.append(f"{azure_domain}/{group_directory}/*")
-                        print(f"prefixes: {allowed_prefixes}")
                     else:
                         print(f"No directory found for group {group_name}")
-                
+
+                # Debug print statements
                 print(f"directory_resources: {directory_resources}")
                 print(f"allowed_prefixes: {allowed_prefixes}")
 
-                policy = {
+                return allowed_prefixes, directory_resources
+
+            def generate_s3_policy(s3_bucket_name, home_directory, allowed_prefixes, directory_resources):
+                user_scoped_s3_policy = policy = {
                     'Version': '2012-10-17',
                     'Statement': [
                         {
@@ -564,15 +544,50 @@ Resources:
                         }
                     ]
                 }
-                response = {
-                    "status": "success",
-                    "Policy": json.dumps(policy),
-                    "Role": s3_role_arn,
-                    "HomeDirectory" : f"/{s3_bucket_name}/{azure_domain}/{user}"
-                }
-                # Do not log sensitive information such as passwords
-                print(f"response: {response}")
-                return response
+                return user_scoped_s3_policy
+
+            def lambda_handler(event, context):
+                resp_data = {}
+                print(f"Event: {event}")
+                # Standard Variables for SFTP Auth
+                s3_bucket_name = os.environ['S3BucketName']
+                s3_role_arn = os.environ['S3RoleARN']    
+                dynamodb_table_name = os.environ['DynamoDBTableName']
+                input_protocol = event.get('Protocol', 'SFTP')  
+
+                # Validation of Inputs and Events
+                if 'username' not in event or 'serverId' not in event:
+                    print("Incoming username or serverId missing  - Unexpected")
+                    return resp_data
+                if 'password' in event:
+                    input_password = event['password']
+                    
+                    # Use SecretManager to get these values
+                    azure_client_id = json.loads(get_secret("SFTP/AzureADClientID"))['AzureADClientID']
+                    azure_domain = json.loads(get_secret("SFTP/AzureADDomain"))['AzureADDomain']
+                    azure_tenant_id = json.loads(get_secret("SFTP/AzureADTenantID"))['AzureADTenantID']
+                    user = f"{event['username']}@{azure_domain}"
+                    home_directory = f"{s3_bucket_name}/{azure_domain}/{user}"
+                    print(f"Authenticating user via Graph API: {user}")
+                    try: 
+                        access_token = get_user_access_token(user, input_password, azure_client_id, azure_tenant_id)
+                    except urllib.error.HTTPError as e:
+                        print(f"Auth failure: {e.read().decode('utf-8')}")
+                        return resp_data
+                    sftp_groups = get_user_groups(user, access_token, azure_tenant_id)
+                    allowed_prefixes, directory_resources = get_additional_directory_prefixes(dynamodb_table_name, sftp_groups, s3_bucket_name, azure_domain, home_directory)
+                    user_scoped_s3_policy = generate_s3_policy(s3_bucket_name, home_directory, allowed_prefixes, directory_resources)
+                    resp_data = {
+                        "Status": "success",
+                        "Role": s3_role_arn,
+                        "Policy": json.dumps(user_scoped_s3_policy),
+                        "HomeDirectory" : f"/{s3_bucket_name}/{azure_domain}/{user}"
+                    }
+                else:
+                    print("No password, checking for SSH public key")
+                    input_password = ''
+
+                return resp_data
       Description: A function to lookup and return user data from AWS Secrets Manager.
       Handler: index.lambda_handler
       Role:
