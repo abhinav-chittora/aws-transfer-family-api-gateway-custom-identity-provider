@@ -10,6 +10,13 @@ Parameters:
     Description: If a server is created, the customer identity provider
       is automatically associated with it.
     Default: 'true'
+  AddWAF:
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Type: String
+    Description: If a WAF is created for the Transfer Family server.
+    Default: 'false'
   SecretsManagerRegion:
     Type: String
     Description: (Optional) The region the secrets are stored in.
@@ -25,6 +32,10 @@ Parameters:
     Description: The domain of the Azure AD tenant.
 
 Conditions:
+  AddWAF:
+    Fn::Equals:
+      - Ref: AddWAF
+      - 'true'
   CreateServer:
     Fn::Equals:
       - Ref: CreateServer
@@ -868,7 +879,52 @@ Resources:
                 }
             ]}'
         - TransferServerID: !GetAtt TransferServer.ServerId
-
+  # Add WAF for additional security if requested.
+  BlockedIPSet:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: BlockedIPs
+      Scope: REGIONAL
+      IPAddressVersion: IPV4
+      Addresses:
+        - '87.123.244.94/32'
+        # Add more IPs as needed
+      Description: IPs to block from accessing API Gateway/Transfer Server
+  WebApplicationFirewall:
+    Type: AWS::WAFv2::WebACL
+    Condition: AddWAF
+    Properties:
+      Name: TransferApiWAF
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: TransferApiWAF
+      Rules: 
+        - Name: BlockSourceIPs
+          Priority: 1
+          Action:
+            Block: {}
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !GetAtt BlockedIPSet.Arn
+              IPSetForwardedIPConfig:
+                HeaderName: sourceIp
+                FallbackBehavior: MATCH
+                Position: FIRST
+          VisibilityConfig:
+            SampledRequestsEnabled: false
+            CloudWatchMetricsEnabled: false
+            MetricName: BlockSourceIPs
+  WebACLAssociationv2:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: AddWAF
+    Properties:
+      ResourceArn: !Sub 'arn:aws:apigateway:${AWS::Region}::/restapis/${CustomIdentityProviderApi}/stages/${ApiStage}'
+      WebACLArn: !GetAtt WebApplicationFirewall.Arn
+        
 Outputs:
   ServerId:
     Value:

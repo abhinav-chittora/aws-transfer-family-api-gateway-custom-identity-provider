@@ -18,5 +18,9 @@
   {
     "ParameterKey": "AzureADTenantID",
     "ParameterValue": "<your-azure-tenant-id>"
+  },
+  {
+    "ParameterKey": "AddWAF",
+    "ParameterValue": "false"
   }
 ]
