@@ -277,6 +277,7 @@ Resources:
             - dynamodb:GetItem
             - dynamodb:PutItem
             - dynamodb:Scan
+            - dynamodb:query
             Resource:
               Fn::Sub:
                 - arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}
@@ -402,16 +403,43 @@ Resources:
                 response = secrets_client.get_secret_value(SecretId=secret_name)
                 return response['SecretString']
 
-            def dynamodb_put_item(table_name, item):
-                dynamodb.put_item(TableName=table_name, Item=item)
+            def dynamodb_query_directories(table_name, ids):
+                directories = []
+                ssh_keys = []
+                response = dynamodb.query(
+                        TableName=table_name,
+                        KeyConditionExpression="Id = :id",
+                        ExpressionAttributeValues={
+                            ":id": {"S": ids}
+                        }
+                    )
+                items = response.get("Items", [])
+                for item in items:
+                    # Collect Directory
+                    if "Directory" in item:
+                        directories.append(item["Directory"]["S"])
+                    # Collect SSH Key (if present)
+                    if "SSHPublicKey" in item:
+                        ssh_keys.append(item["SSHPublicKey"]["S"])
+                return directories, ssh_keys
 
-            def dynamodb_get_item(table_name, key):
-                response = dynamodb.get_item(TableName=table_name, Key=key)
-                return response.get('Item')
+            def check_ssh_key_in_table(table_name: str, user_id: str) -> bool:
+                # Query all items for this user
+                response = dynamodb.query(
+                    TableName=table_name,
+                    KeyConditionExpression="Id = :id",
+                    ExpressionAttributeValues={
+                        ":id": {"S": user_id}
+                    }
+                )
 
-            def dynamodb_search_item(table_name, key):
-                response = dynamodb.scan(TableName=table_name, ScanFilter=key)
-                return response.get('Items')
+                items = response.get("Items", [])
+                
+                # Collect SSH keys from DynamoDB
+                ssh_keys = [item["SSHPublicKey"]["S"] for item in items if "SSHPublicKey" in item]
+
+                # Compare with provided SSH key
+                return ssh_keys
 
             def graph_api_request(url, data=None, headers=None):
                 if headers is None:
@@ -485,11 +513,12 @@ Resources:
                     group_id = group['id']
                     group_name = group.get('displayName', '')
                     key = {'Id': {'S': group_id}, 'Directory': {'S': group_name}}
-                    group_item = dynamodb_get_item(table_name=dynamodb_table_name, key=key)
+                    group_item, ssh_keys = dynamodb_query_directories(dynamodb_table_name, group_id)
+                    # group_item = dynamodb_get_item(table_name=dynamodb_table_name, key=key)
                     if group_item:
-                        group_directory = group_item.get('Directory', {}).get('S', '')
-                        directory_resources.append(f'arn:aws:s3:::{s3_bucket_name}/{azure_domain}/{group_directory}/*')
-                        allowed_prefixes.append(f"{azure_domain}/{group_directory}/*")
+                        for group_directory in group_item:
+                            directory_resources.append(f'arn:aws:s3:::{s3_bucket_name}/{azure_domain}/{group_directory}/*')
+                            allowed_prefixes.append(f"{azure_domain}/{group_directory}/*")
                     else:
                         print(f"No directory found for group {group_name}")
 
@@ -521,18 +550,6 @@ Resources:
                             'Resource': [f'arn:aws:s3:::{s3_bucket_name}']
                         },
                         {
-                            'Sid': 'AllowUserHomeAccess',
-                            'Effect': 'Allow',
-                            'Action': [
-                                's3:PutObject',
-                                's3:GetObject',
-                                's3:DeleteObjectVersion',
-                                's3:DeleteObject',
-                                's3:GetObjectVersion'
-                            ],
-                            'Resource': [f'arn:aws:s3:::{home_directory}/*']
-                        },
-                        {
                             'Sid': 'AllowGroupDirectoryAccess',
                             'Effect': 'Allow',
                             'Action': [
@@ -556,7 +573,6 @@ Resources:
 
             def lambda_handler(event, context):
                 resp_data = {}
-
                 # Standard Variables for SFTP Auth
                 s3_bucket_name = os.environ['S3BucketName']
                 s3_role_arn = os.environ['S3RoleARN']    
@@ -595,30 +611,28 @@ Resources:
                     user = event['username']
                     home_directory = f"{s3_bucket_name}/{user}"
                     # Check DynamoDB for SSH Public Key
-                    key = {'Id': {'S': user}, 'Directory': {'S': user}}
-                    user_item = dynamodb_get_item(table_name=dynamodb_table_name, key=key)
-                    if user_item:
-                        ssh_public_key = user_item.get('SSHPublicKey', {}).get('S', '')
-                        if ssh_public_key:
-                            print(f"SSH Public Key found for user {user}")
-
-                            allowed_prefixes, directory_resources = get_additional_directory_prefixes(dynamodb_table_name=dynamodb_table_name, s3_bucket_name=s3_bucket_name, home_directory=home_directory)
-                            user_scoped_s3_policy = generate_s3_policy(s3_bucket_name, home_directory, allowed_prefixes, directory_resources)
-                            resp_data = {
-                                "Status": "success",
-                                "Role": s3_role_arn,
-                                "Policy": json.dumps(user_scoped_s3_policy),
-                                "HomeDirectory" : f"/{s3_bucket_name}/{user}",
-                                "PublicKeys": [ssh_public_key]
-                            }
-                        else:
-                            print(f"No SSH Public Key found for user {user}")
-                            resp_data = {
-                                "Status": "failure",
-                                "Message": "No SSH Public Key found for user"
-                            }
+                    key = [user]
+                    found = check_ssh_key_in_table(dynamodb_table_name, user)
+                    print(found)
+                    if found: 
+                        allowed_prefixes, directory_resources = get_additional_directory_prefixes(dynamodb_table_name=dynamodb_table_name, s3_bucket_name=s3_bucket_name, home_directory=home_directory)
+                        user_scoped_s3_policy = generate_s3_policy(s3_bucket_name, home_directory, allowed_prefixes, directory_resources)
+                        resp_data = {
+                            "Status": "success",
+                            "Role": s3_role_arn,
+                            "Policy": json.dumps(user_scoped_s3_policy),
+                            "HomeDirectory" : f"/{s3_bucket_name}/{user}",
+                            "PublicKeys": found
+                        }
+                    else:
+                        print(f"No SSH Public Key found for user {user}")
+                        resp_data = {
+                            "Status": "failure",
+                            "Message": "No SSH Public Key found for user"
+                        }
                 print(f"Response: {resp_data}")
                 return resp_data
+
       Description: A function to lookup and return user data from AWS Secrets Manager.
       Handler: index.lambda_handler
       Role:
@@ -719,11 +733,11 @@ Resources:
         RequestTemplates:
           application/json: |
             {
-              "username": "$input.params('username')",
-              "serverId": "$input.params('serverId')",
-              "password": "$util.escapeJavaScript($input.params('Password')).replaceAll(".*", "********")",
-              "protocol": "$input.params('protocol')",
-              "sourceIp": "$input.params('sourceIp')"
+            "username": "$util.urlDecode($input.params('username'))",
+            "password": "$util.escapeJavaScript($input.params('Password')).replaceAll("\\'","'")",
+            "protocol": "$input.params('protocol')",
+            "serverId": "$input.params('serverId')",
+            "sourceIp": "$input.params('sourceIp')"
             }
         PassthroughBehavior: WHEN_NO_TEMPLATES
       RequestParameters:
