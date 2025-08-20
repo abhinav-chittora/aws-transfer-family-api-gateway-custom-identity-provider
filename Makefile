@@ -11,7 +11,7 @@ StackName ?= "transfer-family-solution-custom-idp-entra-id"
 # Login to AWS SSO	
 login:
 	@echo "$(COLOUR_GREEN)Logging in to AWS...$(COLOUR_END)"
-	@aws sts get-caller-identity --profile $(PROFILE) > /dev/null 2>&1 || aws sso login --profile $(PROFILE) --use-device-code
+	@aws sts get-caller-identity --profile $(PROFILE) > /dev/null 2>&1 || aws sso login --profile $(PROFILE)
 
 # Setup the AWS network environment
 setup: login

@@ -170,6 +170,12 @@ Resources:
           Value: TransferFamilyGroupAccessTable
         - Key: Purpose
           Value: TransferFamilyGroupAccessTable
+  # SFTP CloudWatch log group
+  TransferServerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/transfer/${AWS::StackName}'
+      RetentionInDays: 7
   #Creation of SFTP server
   TransferServer:
     Type : AWS::Transfer::Server
@@ -199,6 +205,8 @@ Resources:
       PreAuthenticationLoginBanner: "This system is for the use of authorized users only. Individuals using this computer system without authority, or in excess of their authority, are subject to having all of their activities on this system monitored and recorded by system personnel."
       LoggingRole:
         Fn::GetAtt: CloudWatchLoggingRole.Arn
+      StructuredLogDestinations:
+        - !GetAtt TransferServerLogGroup.Arn
       Tags:
         - Key: Name
           Value: SFTPServer
@@ -890,6 +898,19 @@ Resources:
                         "title": "Top File Downloads",
                         "view": "table"
                     }
+                },
+                {
+                  "type": "log",
+                  "x": 0,
+                  "y": 18,
+                  "width": 24,
+                  "height": 6,
+                  "properties": {
+                    "query": "SOURCE ''/aws/transfer/transfer-family-solution-custom-idp-entra-id'' | fields @message, @timestamp, `source-ip` as SourceIp,  `method` as Method, `activity-type` as ActivityType, `message` as FailureReason\n| filter ActivityType LIKE \"AUTH_FAILURE\" | stats count(*) as FailedAttempts by SourceIp, ActivityType, FailureReason, Method\n| sort FailedAttempts desc\n| filter FailedAttempts >= 5",
+                    "region": "${AWS::Region}",
+                    "title": "Failed Auth by Source IP & Activity Type (5+ attempts)",
+                    "view": "table"
+                  }
                 }
             ]}'
         - TransferServerID: !GetAtt TransferServer.ServerId
