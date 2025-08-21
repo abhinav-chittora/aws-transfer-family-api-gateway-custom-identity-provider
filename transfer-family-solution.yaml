@@ -646,9 +646,6 @@ Resources:
       Runtime: python3.11
       Environment:
         Variables:
-          AzureADClientID: ${AzureADClientID}
-          AzureADDomain: ${AzureADDomain}
-          AzureADTenantID: ${AzureADTenantID}
           S3BucketName: !Ref EncryptedS3Bucket
           S3RoleARN: !GetAtt S3TransferAccessRole.Arn
           DynamoDBTableName: !Ref TransferFamilyGroupAccessTable
