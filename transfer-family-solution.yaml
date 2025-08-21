@@ -162,9 +162,7 @@ Resources:
         KeyType: HASH
       - AttributeName: Directory
         KeyType: RANGE
-      ProvisionedThroughput:
-        ReadCapacityUnits: 5
-        WriteCapacityUnits: 5
+      BillingMode: PAY_PER_REQUEST
       Tags:
         - Key: Name
           Value: TransferFamilyGroupAccessTable
