@@ -3,3 +3,5 @@ sftp-parameters.json
 Matterial*
 Internet*
 Documentation*
+*.pdf
+load_testing*
