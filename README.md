@@ -19,7 +19,7 @@ This project deploys an AWS Transfer Family service with Azure AD (Entra ID) int
 
 ## Project Structure
 
-```
+```shell
 .
 ├── Makefile                       # Deployment automation scripts
 ├── README.md                      # This file
@@ -50,7 +50,7 @@ This solution creates:
 **Important:**  
 The Transfer Family server is configured to use API Gateway with the following identity provider URL:
 
-```
+```url
 https://<api-id>.execute-api.<region>.amazonaws.com/<stage>/servers/{serverId}/users/{username}/config
 ```
 
@@ -70,16 +70,19 @@ make <command> PROFILE=your-profile-name
 ### Core Commands
 
 1. **Login to AWS SSO**
+
    ```bash
    make login
    ```
 
 2. **Deploy Network Infrastructure**
+
    ```bash
    make setup
    ```
 
 3. **Deploy Transfer Family Service**
+
    ```bash
    make deploy
    ```
@@ -87,11 +90,13 @@ make <command> PROFILE=your-profile-name
 ### Cleanup Commands
 
 1. **Remove Transfer Family Stack**
+
    ```bash
    make destroy
    ```
 
 2. **Remove Network Stack**
+
    ```bash
    make destroy-setup
    ```
@@ -101,6 +106,7 @@ make <command> PROFILE=your-profile-name
 ## Configuration Files
 
 ### Network Parameters (`parameters.json`)
+
 ```json
 [
   {
@@ -112,6 +118,7 @@ make <command> PROFILE=your-profile-name
 ```
 
 ### SFTP Parameters (`sftp-parameters.json`)
+
 ```json
 [
   {
@@ -146,6 +153,7 @@ make <command> PROFILE=your-profile-name
    - Update `sftp-parameters.json` for your Transfer Family stack
 
 2. **Deploy Infrastructure**
+
    ```bash
    make login
    make setup
@@ -196,6 +204,7 @@ make <command> PROFILE=your-profile-name
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
+
 ## Contributing
 
 1. Fork the repository
